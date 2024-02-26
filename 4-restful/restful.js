@@ -1,135 +1,158 @@
-// Import the necessary modules
-import express from "express"; // Import the Express.js framework
-import fs from "fs"; // Import the Node.js file system module
-const fsPromise = fs.promises; // Promisify the fs module for asynchronous file operations
+import express, { query } from "express";
+// import fs from "fs"; no need to use this 
+import pg from "pg";
 
-const PORT = 8001; // Define the port on which the server will listen
+// const fsPromise = fs.promises; no need to use this 
 
-const app = express(); // Create an Express application
+const PORT = 8001;
 
-// Middleware to accept JSON as the request body
+const pool = new pg.Pool({
+    host: "localhost",
+    port: 5432,
+    user: "postgres",
+    password: "postgres",
+    database: "petshop"
+});
+
+const app = express();
+// middleware to accept json as request body
 app.use(express.json());
 
-// Define a route for GET requests to "/pets"
+// Read all pets
 app.get("/pets", (req, res, next) => {
-    // Read the contents of the "../pets.json" file
-    fsPromise.readFile("../pets.json", "utf-8")
-        .then((text) => {
-            // Parse the JSON data and send it as a JSON response
-            res.json(JSON.parse(text));
+    pool.query('SELECT * FROM pets')
+        .then((data) => {
+            console.log(`All pets: \n, ${data.rows}`);
+            res.json(data.rows);
         })
         .catch((err) => {
-            // If there's an error reading the file, pass it to the error handling middleware
-            next(err);
+            console.error("error querying from pets db", err);
+            res.sendStatus(500);
         });
 });
 
-// Define a route for GET requests to "/pets/:indexNum"
-app.get("/pets/:indexNum", (req, res, next) => {
-    const index = Number(req.params.indexNum); // Extract the "indexNum" parameter from the URL
+// Get single pet
+app.get("/pets/:petId", (req, res, next) => {
 
-    console.log("Using pet index: ", index);
-
-    // Read the contents of the "../pets.json" file (consistent with the /pets route)
-    fsPromise.readFile("../pets.json", "utf-8")
-        .then((text) => {
-            const pets = JSON.parse(text); // Parse the JSON data
-
-            // Check if the index is a valid integer and within the range of the "pets" array
-            if (!Number.isInteger(index) || index < 0 || index >= pets.length) {
-                res.sendStatus(404); // Send a 404 Not Found status code
+    const petId = Number.parseInt(req.params.petId);
+    console.log("Using pet id ", petId);
+    pool.query(`SELECT name, age, kind FROM pets WHERE id = $1`, [petId])
+        .then((data) => {
+            if (data.rows.length == 0) {
+                res.sendStatus(404);
                 return;
             }
-
-            // Respond with the pet data at the specified index
-            res.json(pets[index]);
+            console.log(data.rows[0]);
+            res.json(data.rows[0]);
         })
-        .catch((err) => next(err)); // Pass any error to the error handling middleware
+        .catch((err) => {
+            console.error(err);
+            res.sendStatus(500);
+        });
 });
 
-// Define a route for POST requests to "/pets"
-app.post("/pets", (req, res, next) => {
-    const age = Number(req.body.age); // Extract the "age" from the request body
-    const { name, kind } = req.body; // Extract "name" and "kind" from the request body
 
-    // Check if "name," "kind," and "age" exist and "age" is a number
+
+// create a new pet
+app.post("/pets", (req, res, next) => {
+    const age = Number(req.body.age);
+    const name = req.body.name;
+    const kind = req.body.kind;
+    console.log(`Name: ${name}, Age: ${age}, Kind: ${kind}`)
+    // return 400 if name or kind is absent, or age is not a number
     if (!name || !kind || Number.isNaN(age)) {
-        // If validation fails, send a 400 Bad Request status code
         res.sendStatus(400);
         return;
     }
-
-    // Log the creation of a new pet
     console.log(`Creating pet with - Name: ${name}, Age: ${age}, Kind: ${kind}`);
-
-    // Create a pet object
-    const pet = { name: name, age: age, kind: kind };
-
-    // Read the contents of the "../pets.json" file
-    fsPromise.readFile("../pets.json", "utf-8")
-        .then((text) => { // Read the existing pets data
-            const pets = JSON.parse(text); // Parse the JSON data
-            pets.push(pet); // Add the new pet to the array
-            return pets; // Return the updated pets array
-        })
-        .then((pets) => { // Write the updated pets data back to the file
-            return fsPromise.writeFile("../pets.json", JSON.stringify(pets));
-        })
-        .then(() => {
-            // If the file write is successful, send a JSON response with the new pet data
-            console.log("Added new pet to pets.json");
-            res.json(pet);
+    pool.query(`INSERT INTO pets (name, kind, age) VALUES ($1, $2, $3) RETURNING *`,
+        [name, kind, age])
+        .then((data) => {
+            console.log("Newly created pet: ", data.rows[0]);
+            const newPet = data.rows[0];
+            delete newPet.id;
+            res.json(newPet);
         })
         .catch((err) => {
-            next(err); // Pass any error to the error handling middleware
-        });
-});
+            console.log(err);
+            res.sendStatus(500);
+        })
+})
 
-// Define a route for PATCH requests to "/pets/:indexNum"
-app.patch('/pets/:indexNum', function (req, res, next) {
-    const index = Number(req.params.indexNum); // Extract the "indexNum" parameter from the URL
-    const name = req.body.name; // Extract the "name" from the request body
 
-    // Check if there is an actual index and a name, but not checking the range
-    if (!Number.isInteger(index) || index < 0 || !name) {
-        res.sendStatus(400); // Send a 400 Bad Request status code
-        return;
+
+// UPDATE ONE route with partial data (patch)
+app.patch('/pets/:id', (req, res) => {
+    // destruct the id off of the request parameters
+    const { id } = req.params;
+
+    // destruct name, kind, age off of the request body
+    const { name, age, kind } = req.body;
+
+    // if age exists AND it's not an integer, kick back the request
+    if (age !== undefined && isNaN(parseInt(age))) {
+        res.status(400).send(`Bad Request -- age must be an integer, if it exists`); return;
     }
 
-    // Read the contents of the "../pets.json" file
-    fsPromise.readFile("../pets.json", "utf-8")
-        .then((text) => {
-            const pets = JSON.parse(text); // Parse the JSON data
+    // if the id isn't an integer, kick back the request
+    if (isNaN(parseInt(id))) {
+        res.status(400).send(`Bad Request -- id must be an integer`); return;
+    }
 
-            // Check if the index is within the bounds of the "pets" array
-            if (index < 0 || index >= pets.length) {
-                res.sendStatus(404); // Send a 404 Not Found status code
-                return;
+    // query our pool
+    pool.query(`UPDATE pets SET name = coalesce($1, name), age = coalesce($2, age), kind = coalesce($3, kind) WHERE id = $4 RETURNING *`,
+        [name, age, kind, id])
+        .then((results) => {
+            try {
+                // if we don't get any results back, then send a 404
+                if (results.rowCount < 1) {
+                    res.status(404).send(`Not found -- pet at index ${id} was not found`); return;
+                }
+                // if we do get data back
+                else {
+                    res.status(200).json(results.rows[0]); return;
+                }
             }
-
-            // Update the pet's name at the specified index
-            pets[index].name = name;
-
-            // Write the updated pets data back to the file
-            return fsPromise.writeFile("../pets.json", JSON.stringify(pets));
-        })
-        .then(() => {
-            // If the file write is successful, send a JSON response indicating success
-            console.log(`Updated pet at index ${index} with new name: ${name}`);
-            res.json({ message: 'Pet updated successfully' });
-        })
-        .catch((err) => {
-            next(err); // Pass any error to the error handling middleware
+            catch (err) {
+                console.error(err.message);
+                res.status(500).send(`Internal Server Error -- failed while trying to 'update pets'`); return;
+            }
         });
 });
 
-// Define an internal server error catching middleware
+
+app.delete('/pets/:indexNum', function (req, res, next) {
+    const id = Number.parseInt(req.params.indexNum);
+    console.log("id: ", id);
+    if (Number.isNaN(id)) {
+        res.sendStatus(400);
+        return;
+    }
+    console.log("Deleting pet with id ", id)
+
+    pool.query(`DELETE FROM pets WHERE id = $1 RETURNING *`, [id])
+        .then((result) => {
+            if (result.rows.length === 0) {
+                console.log("No pet found with that id");
+                res.sendStatus(404);
+            } else {
+                console.log("Deleted pet: \n", result.rows[0]);
+                res.send(result.rows[0]);
+            }
+        })
+        .catch((err) => {
+            console.log(err)
+            res.sendStatus(500);
+        })
+})
+
+
+// internal server error catching middleware
 app.use((err, req, res, next) => {
-    console.error(err); // Log the error to the console
-    res.sendStatus(500); // Send a 500 Internal Server Error status code
+    console.error(err);
+    res.sendStatus(err.status || 500).send("Internal Server Error");
 });
 
-// Start the server and listen on the specified port
 app.listen(PORT, () => {
     console.log(`Listening on port ${PORT}`);
 });
